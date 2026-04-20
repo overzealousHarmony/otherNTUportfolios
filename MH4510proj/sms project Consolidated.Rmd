@@ -1,0 +1,405 @@
+---
+title: "SMS Spam Classification"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-10-08"
+---
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(tidytext)
+library(caret)
+library(textstem)
+library(tm)
+library(wordcloud)
+library(ggplot2)
+library(dplyr)
+library(text2vec)
+library(glmnet)
+library(xgboost)
+library(Matrix)
+library(pROC)
+library(kableExtra)
+library(SnowballC)
+library(tensorflow)
+library(keras)
+library(superml)
+library(keras3)
+```
+
+
+Data Cleaning
+```{r}
+sms_data <- read.csv("spam.csv")
+
+sms_data <- sms_data[!duplicated(sms_data), ] %>%
+select(v2, v1) %>%
+rename(text = v2, label = v1) %>%
+mutate(label = factor(label, levels = c("ham", "spam"), labels = c(0, 1)))
+
+data <- sms_data %>%
+mutate(text = text %>%
+str_replace_all("[^A-Za-z@]", " ") %>%
+str_squish() %>%
+str_to_lower() %>%
+str_replace_all("@", "twacc") %>%
+lemmatize_strings() %>%
+removeWords(stopwords("en")))
+
+dim(data)
+head(data)
+
+```
+
+Class Distribution
+```{r}
+ggplot(data, aes(x = label, fill = label)) + geom_bar() +
+labs(title = "Distribution of Ham vs Spam")
+```
+
+Word Clouds
+```{r}
+ham_data <- data[data$label == 0,]
+spam_data <- data[data$label == 1,]
+
+ham_wc <- termFreq(ham_data$text)
+spam_wc <- termFreq(spam_data$text)
+
+wordcloud(names(ham_wc), ham_wc, max.words = 100, random.order = FALSE, rot.per = 0.35)
+wordcloud(names(spam_wc), spam_wc, max.words = 100, random.order = FALSE, rot.per = 0.35)
+```
+
+Common Word Frequencies
+```{r}
+top_words <- data %>%
+unnest_tokens(word, text) %>%
+count(label, word, sort = TRUE) %>%
+group_by(label) %>%
+slice_max(n, n = 30) %>%
+ungroup() %>%
+mutate(word = reorder_within(word, n, label))
+
+ggplot(top_words, aes(x = n, y = word, fill = factor(label))) +
+geom_col(show.legend = FALSE) +
+facet_wrap(~ label, scales = "free_y") +
+scale_y_reordered() +
+labs(title = "30 Most Common Words per Label", x = "Frequency", y = NULL) +
+theme_minimal()
+```
+
+Train-test split
+```{r}
+set.seed(123)
+train_idx <- createDataPartition(data$label, p = 0.8, list = FALSE)
+train_data <- data[train_idx, ]
+test_data <- data[-train_idx, ]
+
+#Numeric labels 
+y_train <- as.numeric(as.character(train_data$label))
+y_test <- as.numeric(as.character(test_data$label))
+```
+
+Document-Term Matrix
+```{r}
+
+it_train <- itoken(train_data$text, 
+             tokenizer = word_tokenizer,
+             progressbar = FALSE)
+
+vocab <- create_vocabulary(it_train) %>% 
+  prune_vocabulary(10)
+
+vectorizer <- vocab_vectorizer(vocab)
+dtm_train <- create_dtm(it_train, vectorizer)
+
+
+it_test <- itoken(test_data$text, 
+             tokenizer = word_tokenizer,
+             progressbar = FALSE)
+
+dtm_test <- create_dtm(it_test, vectorizer)
+dim(dtm_train)
+dim(dtm_test)
+
+```
+
+XGBoost Model
+```{r}
+y_train <- as.numeric(as.character(train_data$label))
+y_test <- as.numeric(as.character(test_data$label))
+
+
+dtrain <- xgb.DMatrix(as.matrix(dtm_train[,-1]), label = y_train)
+dtest  <- xgb.DMatrix(as.matrix(dtm_test[,-1]), label = y_test)
+
+params <- list(
+objective = "binary:logistic",
+eval_metric = "error",
+max_depth = 6,
+eta = 0.3,
+subsample = 0.8,
+colsample_bytree = 0.8
+)
+
+xgb_model <- xgb.train(params, dtrain, nrounds = 100, watchlist = list(train = dtrain, eval = dtest), early_stopping_rounds = 10, verbose = 1)
+
+predictions <- predict(xgb_model, as.matrix(dtm_test[,-1]))
+pred_labels <- ifelse(predictions > 0.5, 1, 0)
+
+confusion_matrix <- table(Predicted = pred_labels, Actual = y_test)
+confusion_matrix
+
+TN <- confusion_matrix[1, 1]  
+FP <- confusion_matrix[2, 1]   
+FN <- confusion_matrix[1, 2]  
+TP <- confusion_matrix[2, 2] 
+
+# Additional metrics
+accuracy_1 <- (TP + TN) / sum(confusion_matrix)
+precision_1 <- TP / (TP + FP)
+recall_1 <- TP / (TP + FN)  
+specificity_1 <- TN / (TN + FP)
+f1_score <- 2 * (precision_1 * recall_1) / (precision_1 + recall_1)
+
+
+# Calculate AUC
+roc_obj <- roc(y_test, predictions)
+auc_value_1 <- auc(roc_obj)
+
+# feature importance
+xgb.plot.importance(xgb.importance(model = xgb_model))
+```
+
+TF-IDF + LASSO
+```{r}
+model_tfidf <- TfIdf$new()
+tfidf_train <- model_tfidf$fit_transform(dtm_train)
+tfidf_test <- model_tfidf$transform(dtm_test)
+
+tfidf_train <- as_tibble(as.matrix(tfidf_train)) %>% 
+  mutate(Y = train_data$label)
+
+tfidf_test <- as_tibble(as.matrix(tfidf_test)) %>% 
+  mutate(Y = test_data$label)
+
+lambda_seq <- 10^seq(-4, 0, length = 20)
+
+lasso <- caret::train(
+  Y ~ ., 
+  data = tfidf_train,
+  method = "glmnet",
+  trControl = caret::trainControl("cv", number = 5),
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda_seq),
+  preProcess = c("scale")
+)
+
+
+best_lambda <- lasso$bestTune$lambda
+best_lambda
+
+confusion_matrix <- confusionMatrix(predict(lasso, tfidf_test), tfidf_test$Y, positive="1")
+
+confusion_matrix
+
+# Additional metrics
+accuracy_2 <- confusion_matrix$overall["Accuracy"]
+precision_2 <- confusion_matrix$byClass['Pos Pred Value'] 
+recall_2 <- confusion_matrix$byClass['Sensitivity']
+f1_score_2 <- 2 * ((precision_2 * recall_2) / (precision_2 + recall_2))
+specificity_2 <- confusion_matrix$byClass['Specificity'] 
+
+# Calculate AUC
+predictions <- predict(lasso, tfidf_test, type = "prob")[,2]  
+roc_obj <- roc(y_test, predictions)
+auc_value_2 <- auc(roc_obj)
+
+```
+GloVe Embedding
+```{r}
+# Training data tcm
+tcm <- create_tcm(it_train, vectorizer, skip_grams_window = 5)
+# Train GloVe
+glove <- GlobalVectors$new(rank = 100, x_max = 10)
+wv_main <- glove$fit_transform(tcm, n_iter = 20)
+word_vectors <- wv_main + t(glove$components)
+
+
+
+```
+GloVe + LASSO Embedding
+```{r}
+
+glove_train <- as_tibble(as.matrix(dtm_train %*% word_vectors)) %>% mutate(Y = train_data$label)
+glove_test <- as_tibble(as.matrix(dtm_test %*% word_vectors)) %>% mutate(Y = test_data$label)
+
+lambda_seq <- 10^seq(-4, 0, length = 20)
+
+lasso_glove <- caret::train(
+  Y ~ ., 
+  data = glove_train,
+  method = "glmnet",
+  trControl = caret::trainControl("cv", number = 5),
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda_seq),
+  preProcess = c("scale")
+)
+
+best_lambda <- lasso_glove$bestTune$lambda
+best_lambda
+confusion_matrix <- confusionMatrix(predict(lasso_glove, glove_test), glove_test$Y, positive="1")
+confusion_matrix
+
+# Additional metrics
+accuracy_3 <- confusion_matrix$overall["Accuracy"]
+precision_3 <- confusion_matrix$byClass['Pos Pred Value'] 
+recall_3 <- confusion_matrix$byClass['Sensitivity']
+f1_score_3 <- 2 * ((precision_3 * recall_3) / (precision_3 + recall_3))
+specificity_3 <- confusion_matrix$byClass['Specificity'] 
+
+# Calculate AUC
+predictions <- predict(lasso_glove, glove_test, type = "prob")[,2]  
+roc_obj <- roc(y_test, predictions)
+auc_value_3 <- auc(roc_obj)
+
+```
+
+Glove Embedding + LSTM
+```{r}
+
+# Number of unique words
+paste(train_data$text, collapse = " ") %>% 
+  str_split(" ") %>% 
+  unlist() %>% 
+  n_distinct() # 5628 unique words
+
+tokenizer <- text_tokenizer(num_words = 5600)  # Keep top 5600 words
+tokenizer %>% fit_text_tokenizer(train_data$text)
+
+train_sequences <- texts_to_sequences(tokenizer, train_data$text)
+test_sequences <- texts_to_sequences(tokenizer, test_data$text)
+
+# Pad sequences to same length
+# Calculate sequence length that is in the 95% percentile of the training data
+seq_lengths <- sapply(train_sequences, length)
+max_length <- min(100, quantile(seq_lengths, 0.95) %>% as.integer())
+cat("Using sequence length:", max_length, "\n")
+
+X_train <- pad_sequences(train_sequences, maxlen = max_length, padding = 'post', truncating = 'post')
+X_test <- pad_sequences(test_sequences, maxlen = max_length, padding = 'post', truncating = 'post')
+
+y_train <- as.numeric(as.character(train_data$label))
+y_test <- as.numeric(as.character(test_data$label))
+
+# Create embedding matrix
+num_words <- min(tokenizer$num_words, length(tokenizer$word_index))
+embedding_matrix <- array(0, c(num_words + 1, 100))  
+
+for (word in names(tokenizer$word_index)) {
+  idx <- tokenizer$word_index[[word]]
+  if (idx <= num_words && word %in% rownames(word_vectors)) {
+    embedding_matrix[idx + 1, ] <- word_vectors[word, ]  
+  }
+}
+
+# Building LSTM model
+model <- keras_model_sequential() %>%
+  layer_embedding(
+    input_dim = num_words + 1,
+    output_dim = 100,
+    input_length = max_length,
+    weights = list(embedding_matrix),
+    trainable = FALSE
+  ) %>%
+  layer_lstm(
+    units = 64,
+    dropout = 0.4,
+    recurrent_dropout = 0.4
+  ) %>%
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_dropout(rate = 0.4) %>%
+  layer_dense(units = 1, activation = "sigmoid")
+
+# Compile model
+model %>% compile(
+  optimizer = optimizer_adam(learning_rate = 0.01),
+  loss = "binary_crossentropy",
+  metrics = "accuracy"
+)
+
+summary(model)
+
+# Step 9: Train the model
+cat("Starting training...\n")
+history <- model %>% fit(
+  X_train, y_train,
+  epochs = 50,
+  batch_size = 32,
+  view_metrics = FALSE 
+)
+
+# Step 10: Evaluate
+predictions <- model %>% predict(X_test)
+predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+
+# Calculate metrics with error handling
+confusion_matrix <- table(Predicted = predicted_classes, Actual = y_test)
+
+# Print the confusion matrix to see what's happening
+print("Confusion Matrix:")
+print(confusion_matrix)
+
+TN <- confusion_matrix[1, 1]  # True Negative
+FP <- confusion_matrix[2, 1]  # False Positive  
+FN <- confusion_matrix[1, 2]  # False Negative
+TP <- confusion_matrix[2, 2]  # True Positive
+
+# Additional metrics
+accuracy_4 <- (TP + TN) / sum(confusion_matrix)
+precision_4 <- TP / (TP + FP)
+recall_4 <- TP / (TP + FN)  # Sensitivity
+specificity_4 <- TN / (TN + FP)
+f1_score <- 2 * (precision_4 * recall_4) / (precision_4 + recall_4)
+
+# Calculate AUC
+roc_obj <- roc(y_test, predictions)
+auc_value_4 <- auc(roc_obj)
+cat("AUC:", round(auc_value, 4), "\n")
+
+```
+
+All metric and evaluation scores for all models
+```{r}
+cat("XGBoost:\n")
+cat("Accuracy:", round(accuracy_1, 4), "\n")
+cat("Precision:", round(precision_1, 4), "\n")
+cat("Recall:", round(recall_1, 4), "\n")
+cat("F1-Score:", round(f1_score_1, 4), "\n")
+cat("Specificity:", round(specificity_1, 4), "\n")
+cat("AUC:", round(auc_value_1, 4), "\n\n")
+
+cat("TF-IDF + LASSO:\n")
+cat("Accuracy:", round(accuracy_2, 4), "\n")
+cat("Precision:", round(precision_2, 4), "\n")
+cat("Recall:", round(recall_2, 4), "\n")
+cat("F1-Score:", round(f1_score_2, 4), "\n")
+cat("Specificity:", round(specificity_2, 4), "\n")
+cat("AUC:", round(auc_value_2, 4), "\n\n")
+
+cat("GloVe Embedding + LASSO:\n")
+cat("Accuracy:", round(accuracy_3, 4), "\n")
+cat("Precision:", round(precision_3, 4), "\n")
+cat("Recall:", round(recall_3, 4), "\n")
+cat("F1-Score:", round(f1_score_3, 4), "\n")
+cat("Specificity:", round(specificity_3, 4), "\n")
+cat("AUC:", round(auc_value_3, 4), "\n\n")
+
+cat("Glove Embedding + LSTM:\n")
+cat("Accuracy:", round(accuracy_4, 4), "\n")
+cat("Precision:", round(precision_4, 4), "\n")
+cat("Recall:", round(recall_4, 4), "\n")
+cat("F1-Score:", round(f1_score_4, 4), "\n")
+cat("Specificity:", round(specificity_4, 4), "\n")
+cat("AUC:", round(auc_value_4, 4), "\n\n")
+
+```

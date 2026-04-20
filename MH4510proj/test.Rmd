@@ -1,0 +1,52 @@
+---
+title: "Detecting SMS Spam Using Machine Learning and Deep Learning Approaches"
+author: Adele Teng(U2240156B), Clarrance Seah Jing Xiong(U2140255A), Wong Zi Xun(U2240117A),
+  Kevin Lee Zhi Hong(U2140142L)
+subtitle: MH4510
+output:
+  pdf_document:
+    toc: false
+  slidy_presentation: default
+  ioslides_presentation: default
+  beamer_presentation:
+    latex_engine: xelatex
+    colortheme: lily
+    fig_caption: false
+    fonttheme: structurebold
+    slide_level: 2
+    theme: Darmstadt
+    toc: false
+classoption: t
+header-includes:
+- \titlegraphic{\centering \includegraphics[height=2cm]{ntu_logo.png}}
+- \usepackage{animate}
+- \usepackage{booktabs}
+- \setbeamercolor{block title}{bg=blue!75!black,fg=white}
+- \setbeamercolor{block body}{bg=white!90!blue}
+fontsize: 9pt
+always_allow_html: true
+--- 
+
+```{r}
+
+library(kableExtra)
+library(tidyverse)
+
+first <- c('\\textbf{First} Message','\\textbf{First}\n Message','First Message')
+second <- c('Second Message','Second Message','Second Message')
+third <- c('Third Message','Third Message','Third Message')
+
+data.frame(first,second,third) %>%
+  mutate_all(linebreak) %>%
+  kable(format='latex',caption="Caption",
+        col.names = c('First',"Second","Third"), booktabs = T, escape = FALSE) %>% 
+  kable_styling(latex_options = c("HOLD_position"), font_size = 7) %>% 
+  row_spec(0,bold=T,color = 'white', background = '#7c3042') 
+```
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

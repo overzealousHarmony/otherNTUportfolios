@@ -1,0 +1,329 @@
+---
+title: "Detecting SMS Spam Using Machine Learning and Deep Learning Approaches"
+subtitle: "MH4510 Group 7: Pattern Miners"
+author: "Adele Teng(U2240156B), Clarrance Seah Jing Xiong(U2140255A), Wong Zi Xun(U2240117A), Kevin Lee Zhi Hong(U2140142L)"
+
+
+output:
+  beamer_presentation:
+    latex_engine: xelatex
+    colortheme: lily
+    fig_caption: no
+    fonttheme: structurebold
+    slide_level: 2
+    theme: Darmstadt
+    toc: no
+  slidy_presentation: default
+  ioslides_presentation: default
+classoption: t
+header-includes: 
+  - \titlegraphic{\centering \includegraphics[height=2cm]{ntu_logo.png}}
+  - \usepackage{animate}
+  - \usepackage{booktabs}
+  - \setbeamercolor{block title}{bg=blue!75!black,fg=white}
+  - \setbeamercolor{block body}{bg=white!90!blue}
+fontsize: 9pt
+always_allow_html: yes
+
+---
+
+```{r r global_options, include=FALSE, message=FALSE}
+# the following command prevents all the R codes 
+# from being included into the slides
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      out.width = "100%", out.height = "70%",
+                      fig.align='center', fig.width=10, fig.height=7 )
+
+library(tidyverse)
+library(tidytext)
+library(caret)
+library(ggplot2)
+library(dplyr)
+library(textstem)
+library(tm)
+library(wordcloud)
+
+library(stargazer) # for printing nice regression tables
+
+```
+
+```{r}
+sms_data <- read.csv("spam.csv")
+
+
+# Remove duplicates
+sms_data <- sms_data[!duplicated(sms_data), ]
+
+
+sms_data <- sms_data %>% 
+  select(v2,v1) %>%
+  rename(text = v2, label = v1) %>%
+  mutate(label = factor(label, levels = c("ham", "spam"), labels = c(0,1)))
+
+
+data<- sms_data %>%
+  mutate(text = text %>% 
+           str_replace_all("[^A-Za-z@]", " ") %>%
+           str_squish() %>%
+           str_to_lower() %>%
+           str_replace_all("@", "twacc")) %>% # emails will use @
+  mutate(text= lemmatize_strings(text)) %>%
+  mutate(text = removeWords(text, stopwords("en")))
+```
+```{r}
+
+# Plotting word cloud for ham and spam data 
+
+ham_data <- data[data$label == 0,]
+spam_data <- data[data$label == 1,]
+
+ham_words_freq <- termFreq(ham_data$text)
+spam_words_freq <- termFreq(spam_data$text)
+```
+## Introduction
+
+\begin{block}{Background}
+  \begin{itemize}
+    \item Spam messages are a growing cybersecurity and privacy concern, SMS spam affects billions of users and businesses annually.
+    \item Detecting spam prevents phishing, scams, and data theft.
+    \item A classic but still evolving NLP challenge.
+    \item Manual filtering is inefficient and automation via text mining and ML is essential.
+  \end{itemize}
+\end{block}
+
+\begin{block}{Objective} 
+Develop and compare models that automatically classify SMS as ham (0) or spam (1).
+\end{block}
+
+\begin{block}{Dataset}
+  \begin{itemize}
+    \item \href{https://www.kaggle.com/datasets/uciml/sms-spam-collection-dataset}{\color{blue}Public SMS Spam Collection Dataset (UCI/Kaggle)}
+    \item 5,169 unique messages after cleaning
+    \item \textasciitilde{}88\% ham, 12\% spam
+  \end{itemize}
+\end{block}
+
+## Data preprocessing & Exploratory Data Analysis
+\begin{columns}
+    \begin{column}{0.3\textwidth}
+    \begin{block}{Data Cleaning}
+    \fontsize{6pt}{7pt}
+    \begin{enumerate}
+      \item Removed duplicates and nulls.
+      \item Converted text to lowercase.
+      \item Removed non-alphabetic symbols, lemmatized words.
+      \item Replaced “@” with placeholder token “twacc”.
+      \item Removed English stopwords.
+    \end{enumerate}
+  \end{block}
+\end{column}
+
+\begin{column}{0.3\textwidth}
+  \begin{block}{Feature Engineering}
+  \fontsize{6pt}{7pt}
+    \begin{itemize}
+      \item Bag-of-Words (DTM)
+      \item TF-IDF weighting
+      \item Word Embeddings (GloVe, 50–100 dimensions)
+    \end{itemize}
+  \end{block}
+```{r bar_distribution, out.height="20%"}
+## Data set distribution of classes
+ggplot(data=data, aes(x=label, fill=label)) + geom_bar()
+```
+\end{column}
+
+\begin{column}{0.4\textwidth}
+```{r freq_words, out.width="105%", out.height="40%"}
+# Comparing frequency of most common words in both labels
+library(ggplot2)
+library(dplyr)
+library(tidytext)
+
+top_words <- data %>%
+  unnest_tokens(word, text) %>%
+  count(label, word, sort = TRUE) %>%
+  group_by(label) %>%
+  slice_max(n, n = 30) %>%
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, label))
+
+ggplot(top_words, aes(x = n, y = word, fill = factor(label))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ label, scales = "free_y") +
+  scale_y_reordered() +
+  labs(
+    title = "30 most common Words in each label",
+    x = "Frequency",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8))
+
+# There is quite a bit of overlap, such as 'u', 'call', 'now', 'get', 'just'. Not as much overlap as wanted, but at least that means the word-frequency alone isnt rly enough to predict the labels. 
+```
+\end{column}
+\end{columns}
+
+
+\begin{columns}
+  \begin{column}{0.4\textwidth}
+  \begin{block}{Key Insights (EDA)}
+    \fontsize{6pt}{7pt}
+    \begin{itemize}
+      \item Spam words: “free”, “win”, “call”, “claim”, “txt”.
+      \item Ham words: “ok”, “thanks”, “see”, “tomorrow”.
+      \item Strong class imbalance (ham >> spam).
+    \end{itemize}
+  \end{block}
+\end{column}
+
+\begin{column}{0.3\textwidth}
+\begin{figure}
+\centering
+\includegraphics[width = 0.75\textwidth]{ham_word_cloud.png}
+ \end{figure} 
+\end{column}
+
+\begin{column}{0.3\textwidth}
+\begin{figure}
+\centering
+\includegraphics[width = 0.75\textwidth]{spam_word_cloud.png}
+ \end{figure} 
+\end{column}
+\end{columns}
+
+
+
+\begin{columns}
+\begin{column}{1.05\textwidth}
+  \fontsize{8pt}{9pt}\selectfont
+  \textbf{Interpretation:} EDA shows distinct linguistic patterns: spam messages contain incentive-related and promotional terms, while ham messages are conversational.
+\end{column}
+\end{columns}
+
+
+## Model Performance
+\begin{columns}
+\begin{column}{1.3\textwidth}
+\textbf{Model Overview}
+```{r model_tbl, results = "asis",include=TRUE, out.height="200%"}
+library(kableExtra)
+library(tidyverse)
+
+
+data.frame(Model = c("XGBoost", 
+            "BoW+TF-IDF+LASSO", 
+            "GloVe+LASSO", 
+            "GloVe+LSTM"),
+  Representation = c("BoW", 
+                     "BoW+TF-IDF", 
+                     "50-dim embeddings", 
+                     "100-dim Embeddings"),
+  Method = c("Ensemble Trees", 
+             "L1-Regularized \nLogistic Regression", 
+             "Sparse Logistic Regression", 
+             "Recurrent Neural Network"),
+  "Highlights/Parameters" = c(
+    "Logistic objective \nEarly stopping \n100 rounds",
+    "Cross-validation for \n$\\lambda$ selection",
+    "Semantic-aware \nrepresentation",
+    "50 LSTM units, \nDropout 0.2, \n50 epochs"
+  )) %>%
+  mutate_all(linebreak) %>%
+  kable(format='latex',
+        col.names = c('Model',"Representation","Method","Highlights/Parameters"), booktabs = T, escape = FALSE) %>% 
+  kable_styling(latex_options = c("HOLD_position"), font_size = 7) %>% 
+  row_spec(0,bold=T,color = 'black', background = 'white')
+
+```
+
+\end{column}
+\end{columns}
+
+\vspace{0.5cm}
+\begin{columns}
+\begin{column}{1.3\textwidth}
+\textbf{Performance Summary}
+```{r perf_tbl, results = "asis",include=TRUE, out.height="200%"}
+library(kableExtra)
+library(tidyverse)
+
+data.frame(Model = c("XGBoost", 
+            "BoW+TF-IDF+LASSO", 
+            "GloVe+LASSO", 
+            "GloVe+LSTM"),
+  Accuracy  = c("0.973", 
+                "0.961",
+                "0.935",
+                "0.951"),
+  AUC  = c("0.977", 
+           "0.965",
+           "0.940",
+           "0.932"),
+  Comments  = c(
+    "Strong accuracy, interpretable", 
+    "Sparse and interpretable",
+    "Semantic-rich, lightweight",
+    "Semantic-rich, slow to train")
+  )%>%
+  mutate_all(linebreak) %>%
+  kable(format='latex',
+        col.names = c('Model',"Accuracy","AUC","Comments"), booktabs = T, escape = FALSE) %>% 
+  kable_styling(latex_options = c("HOLD_position"), font_size = 7) %>% 
+  row_spec(0,bold=T,color = 'black', background = 'white')
+```
+
+\end{column}
+\end{columns}
+
+
+## Key Takeaways
+\begin{columns}
+\begin{column}{0.5\textwidth}
+  \begin{block}{Key Findings}
+    \fontsize{7pt}{8pt}
+    \begin{itemize}
+      \item Best model: XGBoost (Accuracy 97.3\%)
+      \item Best interpretable model: TF-IDF + LASSO (Accuracy 96.1\%)
+      \item Most efficient model: XGBoost (Accuracy 97.3\%)
+    \end{itemize}
+  \end{block}
+  
+  \begin{block}{Limitations}
+    \fontsize{8pt}{9pt}
+    \begin{itemize}
+      \item Class imbalance could bias model toward ham.
+      \item LSTM’s sequential input was averaged — limits temporal learning.
+      \item Generalization to multilingual or new spam sources not tested.
+    \end{itemize}
+    \end{block}
+  
+\end{column}
+
+\begin{column}{0.5\textwidth}
+  \begin{block}{Interpretability}
+    \fontsize{8pt}{9pt}
+    \begin{itemize}
+      \item LASSO coefficients highlight strong predictors: “free”, “win”, “txt”, “call now”.
+      \item XGBoost feature importance confirms similar signals.
+    \end{itemize}
+  \end{block}
+  
+  \begin{block}{Future Work}
+    \fontsize{8pt}{9pt}
+    \begin{enumerate}
+      \item Integrate contextual embeddings (BERT).
+      \item Use SMOTE or cost-sensitive learning for imbalance correction.
+      \item Evaluate cross-dataset transferability.
+    \end{enumerate}
+  \end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.3cm}
+\begin{columns}
+\begin{column}{1.05\textwidth}
+  Combining strong preprocessing, interpretable models, and deep learning leads to robust spam detection systems that can be deployed in real-world messaging platforms.
+\end{column}
+\end{columns}

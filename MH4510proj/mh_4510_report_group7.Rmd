@@ -1,0 +1,330 @@
+---
+title: "Detecting SMS Spam Using Machine Learning and Deep Learning Approaches"
+subtitle: "MH4510 Group 7: Pattern Miners"
+author: "Adele Teng, Clarrance Seah Jing Xiong, 
+Wong Zi Xun, Kevin Lee Zhi Hong"
+date: "22 November 2025"
+abstract: 
+  "This study implements machine learning and deep learning models for spam detection on a SMS Spam Collection Dataset. The dataset is a collection of SMS messages in English tagged with ham or spam labels. We applied the following models, Extreme Gradient Boosting (XGBoost) with BoW, LASSO with BoW and TF-IDF, LASSO with GloVe embeddings and  Long Short-Term Memory (LSTM) Recurrent Neural Network with GloVE embeddings. The models' accuracy, precision, recall, F1-Score and AUC are compared. Results show that GloVE+LSTM performs the best. The findings provide a foundation for implementing effective feature engineering and diverse modeling techniques for high-performance spam detection systems. \\clearpage"
+output:
+  pdf_document: 
+    number_sections: true
+    toc: true
+    toc_depth: 2
+
+---
+```{r echo = FALSE, warning=FALSE, message=FALSE}
+# the following command prevents all the R codes 
+# from being included into the doc
+library(tidyverse)
+library(tidytext)
+library(caret)
+library(textstem)
+library(tm)
+library(wordcloud)
+library(ggplot2)
+library(dplyr)
+library(text2vec)
+library(glmnet)
+library(xgboost)
+library(Matrix)
+library(pROC)
+library(kableExtra)
+library(SnowballC)
+library(tensorflow)
+library(keras)
+library(keras3)
+
+```
+
+\pagebreak
+# Introduction
+
+Spam detection for short message services (SMS) remains an important practical problem in natural language processing and cybersecurity. The objective of this project is to develop, compare, and critically evaluate several machine learning and deep learning approaches for classifying SMS messages as either ham (legitimate) or spam (unsolicited and often malicious). We use a popular SMS spam corpus and implement a complete pipeline that includes preprocessing, feature engineering, model training, and evaluation. The project aims to demonstrate differences in performance between classical models (e.g. XGBoost), sparse logistic methods (BoW+TF-IDF+LASSO), embedding-based linear models (GloVe + LASSO), and deep sequence models (GloVe + LSTM).
+
+
+## Literature Review
+
+Automatic spam filtering is a long-studied problem in machine learning and information retrieval. Early systems relied heavily on Naïve Bayes classifiers  and simple rule-based filters.(Androutsopoulos et. al, 2006) Later work introduced more sophisticated feature engineering (TF-IDF, n-grams) and ensemble methods such as gradient boosted trees (XGBoost).(Chen \& Guestrin, 2016) Word embeddings such as word2vec and GloVe capture semantic relationships between words and have been used to generate dense sentence representations for downstream classification tasks.(Manning et. al, 2014) Recurrent neural networks, especially Long Short-Term Memory(LSTM) variants, are useful when sequential information (word order) is believed to be important. (Hochreiter \& Schmidhuber, 1997)
+
+Recent surveys emphasize that hybrid approaches which combine classical feature-based models and neural embeddings often yield robust performance on text classification benchmarks.(Wallacew & Zhang, 2018) Additionally, L1-regularized logistic regression (LASSO) is a popular and interpretable method to select a sparse set of predictive terms. (Tibshirani, 1996)
+
+## Research Objective
+We aim to design and compare several models that can automatically classify SMS messages as ham (legitimate) or spam (malicious), using both classical machine learning and modern deep learning approaches. The models implemented in this study are Extreme Gradient Boosting (XGBoost) with BoW, LASSO with BoW and TF-IDF, LASSO with GloVe embeddings and  Long Short-Term Memory (LSTM) Recurrent Neural Network with GloVE embeddings.
+
+# Exploratory Data Analysis
+
+## Dataset description
+
+The dataset used in this study is a public SMS spam collection containing tagged SMS messages in English. Each row contains the message text and a label indicating ham or spam. After removing duplicates, the dataset  consists of 5,169 messages.
+
+## Data cleaning and preprocessing
+
+Preprocessing steps applied to the raw text include:
+\begin{itemize}
+\item	Lowercasing text.
+\item	Removing non-alphabetic characters (preserving “@” temporarily to mark emails).
+\item	Replacing “@” with a token (e.g., twacc) to retain email occurrences.
+\item	Lemmatization to improve NLP model performance.
+\item	Tokenization for embedding and n-gram processing.
+\end{itemize}
+
+Lemmatization is a text-preprocessing technique that reduces words to their base form. For example, "walking" is reduced to "walk" and "better" to "good". Treating words with similar meanings as the same makes the text data more consistent, improving Natural Language Processing (NLP) Model performance. It also reduces data redundancy, leading to smaller datasets which are easier to handle for training machine learning models. 
+
+
+```{r echo = FALSE, warning=FALSE, message=FALSE}
+sms_data <- read.csv("spam.csv")
+
+sms_data <- sms_data[!duplicated(sms_data), ] %>%
+  select(v2, v1) %>%
+  rename(text = v2, label = v1) %>%
+  mutate(label = factor(label, levels = c("ham", "spam"),
+                        labels = c(0,1)))
+
+data <- sms_data %>%
+  mutate(text = text %>%
+           str_replace_all("[^A-Za-z@]", " ") %>%
+           str_squish() %>%
+           str_to_lower() %>%
+           str_replace_all("@", "twacc") %>%
+           lemmatize_strings() %>%
+           removeWords(stopwords("en")))
+```
+
+
+## Summary statistics and class imbalance
+
+Table 3.1 shows basic dataset statistics and class distribution.
+
+*Dataset summary (after cleaning)*
+```{r echo = FALSE, warning=FALSE, fig.align = "left"}
+
+data.frame(Statistic= c(
+            "Total messages",
+            "Ham Proportion", 
+            "Spam Proportion"
+            ),
+           Value = c(
+            dim(data)[1],
+            paste0(round(dim(data[data$label == 0,])[1]/dim(data)[1],3)*100),
+            paste0(round(dim(data[data$label == 1,])[1]/dim(data)[1],3)*100))
+           ) %>%
+  mutate_all(linebreak) %>%
+  kable(format='latex',
+        col.names = c('Statistic',"Value"), booktabs = T, escape = FALSE) %>% 
+  kable_styling(latex_options = c("HOLD_position"), font_size = 8)
+```
+
+The dataset highlights a significant class imbalance, with ham messages being the majority.
+
+## Word frequency and word clouds
+```{r echo=FALSE, include=FALSE, warning=FALSE}
+#note: removing white-space from the wordclouds is very complex, so we have instead chosen to export into an image and import it into this report instead. code is here for reference
+
+ham_data <- data[data$label == 0,]
+ham_wc <- termFreq(ham_data$text)
+wordcloud(names(ham_wc), ham_wc, max.words = 100, random.order = FALSE, rot.per = 0.35)
+
+spam_data <- data[data$label == 1,]
+spam_wc <- termFreq(spam_data$text)
+wordcloud(names(spam_wc), spam_wc, max.words = 100, random.order = FALSE, rot.per = 0.35)
+```
+
+\includegraphics[width = 0.25\textwidth]{ham_word_cloud.png}
+\includegraphics[width = 0.25\textwidth]{spam_word_cloud.png}
+
+*Figure 1: Ham Word Cloud (left), Spam Word Cloud (right)*
+
+# Feature Engineering
+The text data must be transformed into numerical vectors before implementing machine learning and deep learning models.
+
+```{r echo = FALSE, warning=FALSE}
+#Train-test split
+set.seed(123)
+train_idx <- createDataPartition(data$label, p = 0.8, list = FALSE)
+train_data <- data[train_idx, ]
+test_data <- data[-train_idx, ]
+
+#Numeric labels 
+y_train <- as.numeric(as.character(train_data$label))
+y_test <- as.numeric(as.character(test_data$label))
+
+#Document-Term Matrix
+it_train <- itoken(train_data$text, 
+             tokenizer = word_tokenizer,
+             progressbar = FALSE)
+
+vocab <- create_vocabulary(it_train) %>% 
+  prune_vocabulary(10)
+
+vectorizer <- vocab_vectorizer(vocab)
+dtm_train <- create_dtm(it_train, vectorizer)
+
+
+it_test <- itoken(test_data$text, 
+             tokenizer = word_tokenizer,
+             progressbar = FALSE)
+
+dtm_test <- create_dtm(it_test, vectorizer)
+
+```
+
+
+## Bag-of-Words(BoW) and Term Frequency-Inverse Document Frequency (TF-IDF)
+Bag-of-words model is a common method to transform NLP text data into numerical vectors. Words in the text data are considered as single tokens without considering the order of the words. A Document-Term-Matrix is created from the data, consisting of every word that appears in the data and their respective word occurrence. 
+
+As utilizing all unique vocabulary in the data to train the data is computationally expensive, words with occurrences of less than 10 are pruned from the data. This removes unsusual words that appear too rarely and hence will have little significance to the model, reducing the word count of the DTM from 5627 to 671. 
+
+*R-code sample of the pruned vocabulary.*
+```{r}
+vocab
+```
+
+A limitation of Bag-Of-Words is that it treats all words equally, hence words with high occurrences may dominate the document, and may not necessarily contribute meaningfully to the model. This can dilute the model's ability to focus on more meaningful terms. 
+
+TF-IDF mitigates this limitation by normalising the terms using the TD-IDF score, which is the product of Term Frequency(TF) and Inverse Document Frequency(IDF):
+$$
+TF\text{-}IDF(t,d,D)=TF(t,d)\cdot IDF(t,D)
+$$
+$$
+TF(t,d) = \log \left( \frac{f_{t,d}}{\sum_{t' \in d} f_{t',d}} \right),\text{   }
+f_{t,d} = \text{raw count of term } t \text{ in document } d
+$$
+$$
+IDF(t,D) = \log \left( \frac{N}{n_t} \right),\text{   }
+D = \text{corpus/set of all documents}, 
+$$
+$$
+N = \text{total number of documents in corpus},\text{   } 
+n_t = \text{number of documents where term } t \text{ appears}
+$$
+TD-IDF score balances both TF and IDF, highlighting terms that are both frequent within a specific document and distinctive across the corpus. Words that frequently appear in the document but are rare across the entire corpus are given more importance compared to in BoW. This adjusts word importance and helps to capture the significance of words in the context of the corpus. 
+
+## Global Vectors for Word Representation (GloVe) embeddings and sentence representations
+
+Another limitation of BoW is that it does not consider similarity between word vectors, such as between 'king' and 'queen', compared with 'keyboard'. GloVE, on the other hand, is an unsupervised learning algorithm that captures semantic relationships between words by analysing co-occurence patterns in the corpus. 
+
+A co-occurrence matrix is built to count the frequency of each word appearing near other words within a document. The algorithm minimises the difference between the dot product of word vectors and pointwise mutual information (PMI), which represents the expected co-occurrence probabilities. This adjusts the vectors such that the vectors will reflect the relationship between words based on the matrix. 
+
+Pointwise Mutual Information (PMI) is a measure of association between two events (in this case, words appearing in a text) based on joint probability of occurring, compared to their individual probabilities. 
+
+$$
+PMI(x,y) = \log \left( \frac{P(x,y)}{P(x)\cdot P(y)} \right),
+$$
+$$
+P(x,y)= \text{joint probability of words x and y occuring together}, \text{   }
+$$
+$$
+P(x),P(y)= \text{individual probabilties of x and y respectively occuring independently}
+$$
+High PMI value indicates strong association between the two words. 
+
+A pre-trained GloVe embedding is not used as the embeddings by Stanford were only trained on Wikipedia, Twitter, and Common Crawl, all of which fail to capture the extremely informal language that is often used in messages. 
+
+
+# Model Selection
+
+This section describes the models implemented, their motivations, and training details.
+
+## Extreme Gradient Boosting (XGBoost)
+
+XGBoost is an ensemble learning method that implementsgradient boosted decision trees. Each successive tree sequentially fits the residuals of the previous trees, minimizing a loss function.
+
+The XGBoost objective is logistic loss applied to a tree ensemble. If $f_k$ denotes the k-th tree, predictions are:
+
+$$
+\hat{y}_i=\sigma(\sum_{k=1}^{K}f_k(x_i)),  \sigma(z)=\frac{1}{(1+e^{-z})} 
+$$
+Key hyperparameters considered include max_depth (tree depth), eta(learning rate), subsample(fraction of training instances per tree) and colsample_bytree(fraction of data/features per tree). These are optimised via grid search combined with cross-validation, which ensures a balance between model performance and the risk of overfitting.
+
+XGBoost is trained using a binary logistic objective and DTM features. Early stopping  using a held-out validation set.
+
+
+## LASSO logistic regression with BoW+TF-IDF
+
+LASSO (L1-penalized) logistic regression is applied to TF-IDF features to yield sparse predictive terms. L1 regularization enforces sparsity in model coefficients and highlights the most predictive terms. Cross-validation is used to select the regularization parameter $\lambda$. $\lambda$ is tuned using cross-validation to optimize predictive performance while maintaining interpretability.
+
+## LASSO with GloVe embeddings
+
+GloVe embeddings are fed into LASSO logistic regression as a low-dimensional representation of each message. This approach captures semantic similarity among words while maintaining interpretability through L1 regularization. The $\lambda$ parameter is tuned via cross-validation similar to the TF-IDF model.
+
+## LSTM with GloVe embeddings
+
+LSTM is a type of recurrent neural network designed to capture sequential dependencies in data. Each SMS message is represented as a sequence of word embeddings derived from GloVe. LSTM is designed to learn long-range patterns, with subsequent dense layers applied for classification. Key hyperparameters - such as the number of LSTM units, dropout rates, learning rate, and batch size - are chosen through a combination of standard heuristics to mitigate overfitting while maintaining predictive accuracy.
+
+Document embeddings are structured such that each of the 100 GloVe-derived features is treated as a seperate timestep. THis sequence representation (21 timesteps × 100 feature per timestep) allows the LSTM to process feature dimensions sequentially. Dropout regularization and dense layers were incorporated to reduce overfitting risks.
+
+The LSTM computes a state update and produces an output $h_t$. For binary classification the final output is passed through a sigmoid and trained with binary cross-entropy loss:
+
+$$
+L=-\sum_{n=1}^{N}[y_i\log \left( \hat{y}_i\right)+(1-y_i)\log \left( 1-\hat{y}_i \right)]
+$$
+
+TensorFlow is an open-source library for numerical computation and machine learning, providing the backend for efficient tensor operations and automatic differentiation. It is used to provide robust support for building and implementing LSTM models.
+
+Keras (and the updated keras3) is a high-level interface built on TensorFlow that simplifies the design, training, and evaluation of deep learning models, such as the LSTM used here. Keras allows rapid prototyping with layers, optimizers, and loss functions while delegating heavy computation to TensorFlow.
+
+We acknowledge that hyperparameter tuning should be done when implementing LSTM, but as it is a very time-consuming process, we have chosen exclude hyperparameter tuning due to time constraints. 
+
+# Results and discussion
+Minimising false positives (misclassifying ham as spam) is critical to avoid classifying important emails as spam. However, because false negatives (misclassifying spam as ham) can also be harmful in light of security concerns and reducing scam victims, minimising false negatives is also integral to a model's performance in spam detection. Hence, our chosen evaluation metrics for the study - accuracy, precision, recall, F1-Score, specificity and AUC - consider how effective the models minimise both false postiive and false negatives. 
+
+Accuracy, precision and specificity are metrics that focus on the correctness of positive predictions, while recall is a metric that focus on how well the model captures all positive instances. F1-score balances precision and recall, while AUC is a performance metric that summarizes a model's ability to differentiate between them across all possible thresholds.
+
+```{r echo = FALSE, warning=FALSE, message=FALSE}
+#refer to code in appendix for how to get numbers
+data.frame(Model = c("XGBoost", 
+            "TF-IDF+LASSO", 
+            "GloVe+LASSO", 
+            "GloVe+LSTM"),
+  Accuracy = c(
+    0.9699903, 0.9641820, 0.9787028, 0.9845111),
+  Precision = c(0.9541284, 0.9266055, 0.9576271, 0.9596774),
+  Recall = c(round(0.8000000,7), 0.7769231, 0.8692308, 0.9153846),
+  "F1-Score" = c(0.8702929, 0.8451883, 0.9112903, 0.9370079),
+  Specificity = c(0.9944629, 0.9911406, 0.9944629, 0.9944629),
+  AUC = c(0.9762714, 0.9795979, 0.9708749, 0.9736903)
+  )%>%
+  mutate_all(linebreak) %>%
+  mutate_all(~ gsub("_", "\\\\_", .)) %>%
+  kable(format='latex',
+        col.names = c("Model", "Accuracy", "Precision", "Recall", "F1-Score", "Specificity", "AUC"), booktabs = T, escape = FALSE)%>% 
+  kable_styling(latex_options = c("HOLD_position"), font_size = 7) %>% 
+  row_spec(0,bold=T,color = 'black', background = 'white')
+
+```
+
+While all models have a high accuracy and precision score, GloVE+LSTM has the highest with an accuracy of 0.984511 and precision of 0.9596774. GloVe+LSTM also has the highest recall, f1-Score and specificity (0.9370079, 0.9944629 and 0.9736903 respectively) amongst all the models. 
+
+The AUC of TF-IDF+LASSO is the highest amongst all the models, though it should be noted that the AUC of all 4 models are high and of similar value.
+
+
+
+## Conclusion
+
+We conclude that GloVE+LSTM is the best model to use for spam detection due to having the highest overall performance across the evaluation metrics. 
+
+Some of the limitations of this study are:
+
+\begin{itemize}
+\item	External validity. Model trained on one dataset might not generalize to other SMS datasets (different countries, languages, or spam campaigns).
+\item	GloVe embedding was derived from the dataset instead of using a pre-trained GloVe embedding. 
+\end{itemize}
+
+For future studies, training contextual embeddings like BERT, building an end-to-end sequence model with token indices and pretrained embeddings, and evaluating robustness across datasets and imbalanced learning strategies could improve models further for better performance. 
+
+
+\pagebreak
+# References
+\begin{itemize}
+\item  Androutsopoulos, I., Metsis, V., Paliouras, G. (2006). Spam filtering with naive Bayes – which naive Bayes? CEAS.
+\item Chen, T. \& Guestrin, C. (2016). XGBoost: A scalable tree boosting system. Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining.
+\item Hochreiter, S.\& Schmidhuber, J. (1997). Long short-term memory. Neural Computation, 9(8), 1735–1780.
+\item Manning, C. D., Pennington, J., Socher, R. (2014). GloVe: Global vectors for word representation. Proceedings of the 2014 Conference on Empirical Methods in Natural Language Processing (EMNLP).
+\item SMS Spam Collection Dataset. (n.d.). [Dataset]. https://www.kaggle.com/datasets/uciml/sms-spam-collection-dataset
+\item Tibshirani, R. (1996). Regression shrinkage and selection via the lasso. Journal of the Royal Statistical Society: Series B (Methodological), 58(1), 267–288.
+\item Wallace, B. \& Zhang, Y. (2018). A sensitivity analysis of (and practitioners’ guide to) convolutional neural networks for sentence classification. Proceedings of the 8th International Joint Conference on Natural Language Processing (IJCNLP).
+\end{itemize}
+ 
+# Appendix
+\href{https://www.dropbox.com/scl/fo/ni4atucw1u1yzzyiggxxb/AGsNtLcew4OiCQK3EFYNtXo?rlkey=bvcvtlc76in654bobr0mewmqv&st=8k0znwe6&dl=0}{\color{blue}Consolidated R Code for the report}

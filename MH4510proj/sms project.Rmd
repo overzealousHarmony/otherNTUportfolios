@@ -1,0 +1,131 @@
+---
+title: "sms spam"
+output: html_document
+date: "2025-10-08"
+---
+
+```{r}
+library(tidyverse)
+library(tidytext)
+library(caret)
+library(ggplot2)
+library(dplyr)
+library(textstem)
+library(tm)
+library(wordcloud)
+```
+# Data cleaning
+```{r}
+sms_data <- read.csv("spam.csv")
+dim(sms_data)
+head(sms_data)
+
+# Remove duplicates
+sms_data <- sms_data[!duplicated(sms_data), ]
+sum(is.na(sms_data)) # 0 NA data
+
+sms_data <- sms_data %>% 
+  select(v2,v1) %>%
+  rename(text = v2, label = v1) %>%
+  mutate(label = factor(label, levels = c("ham", "spam"), labels = c(0,1)))
+
+
+data<- sms_data %>%
+  mutate(text = text %>% 
+           str_replace_all("[^A-Za-z@]", " ") %>%
+           str_squish() %>%
+           str_to_lower() %>%
+           str_replace_all("@", "twacc")) %>% # emails will use @
+  mutate(text= lemmatize_strings(text)) %>%
+  mutate(text = removeWords(text, stopwords("en")))
+head(data)
+dim(data)
+```
+
+# Data set distribution of classes
+```{r}
+ggplot(data=data, aes(x=label, fill=label)) + geom_bar()
+# Massive difference in no. of rows of both labels.
+```
+
+# Word cloud of both labels
+```{r}
+
+# Plotting word cloud for ham and spam data 
+
+ham_data <- data[data$label == 0,]
+spam_data <- data[data$label == 1,]
+
+ham_words_freq <- termFreq(ham_data$text)
+spam_words_freq <- termFreq(spam_data$text)
+
+
+# Ham word cloud
+wordcloud(words = names(ham_words_freq), 
+          freq = ham_words_freq, 
+          max.words = 100,
+          min.freq = 0,
+          random.order = FALSE,
+          rot.per = 0.35)
+        
+
+# Spam word cloud
+wordcloud(words = names(spam_words_freq), 
+          freq = spam_words_freq, 
+          max.words = 100,
+          min.freq = 0,
+          random.order = FALSE,
+          rot.per = 0.35)
+
+
+```
+# Comparing frequency of most common words in both labels
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(tidytext)
+
+top_words <- data %>%
+  unnest_tokens(word, text) %>%
+  count(label, word, sort = TRUE) %>%
+  group_by(label) %>%
+  slice_max(n, n = 30) %>%
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, label))
+
+ggplot(top_words, aes(x = n, y = word, fill = factor(label))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ label, scales = "free_y") +
+  scale_y_reordered() +
+  labs(
+    title = "30 most common Words in each label",
+    x = "Frequency",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8))
+
+# There is quite a bit of overlap, such as 'u', 'call', 'now', 'get', 'just'. Not as much overlap as wanted, but at least that means the word-frequency alone isnt rly enough to predict the labels. 
+```
+
+# Creating the Document Term Matrix
+```{r}
+corpus <- VCorpus(VectorSource(data$text))
+DTM <- DocumentTermMatrix(corpus)
+dim(DTM) # 6106 unique words
+words_freq <- termFreq(data$text)
+
+frequent_words <- words_freq[words_freq>=10]
+
+wordcloud(words = names(frequent_words), freq = frequent_words, min.freq=0, max.words=100, random.order=FALSE, rot.per=0.35)
+
+DTM <- DTM[,names(frequent_words)]
+
+dim(DTM) # 706 unique words
+
+# dataframe of DTM 
+DTM_df <- DTM %>% as.matrix %>% as_tibble
+
+```
+
